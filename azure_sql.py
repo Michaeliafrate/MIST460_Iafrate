@@ -27,7 +27,10 @@ def _require(name):
     return value
 
 
-def connection_string():
+def connection_string(database=None):
+    """Build an ODBC string. Pass database="master" to reach the server
+    itself -- useful when the database name in .env is wrong and you need to
+    ask the server what databases actually exist."""
     server = _require("AZURE_SQL_SERVER")
     # Accept either the bare name or the full FQDN in .env.
     if "." not in server:
@@ -35,15 +38,15 @@ def connection_string():
     return (
         f"DRIVER={{{DRIVER}}};"
         f"SERVER=tcp:{server},1433;"
-        f"DATABASE={_require('AZURE_SQL_DATABASE')};"
+        f"DATABASE={database or _require('AZURE_SQL_DATABASE')};"
         f"UID={_require('AZURE_SQL_USER')};"
         f"PWD={_require('AZURE_SQL_PASSWORD')};"
         "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
     )
 
 
-def get_connection():
-    return pyodbc.connect(connection_string())
+def get_connection(database=None):
+    return pyodbc.connect(connection_string(database))
 
 
 DATABASE = os.environ.get("AZURE_SQL_DATABASE", "")

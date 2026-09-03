@@ -19,6 +19,21 @@ except pyodbc.Error as exc:
             "Blocked by the server firewall. In the Azure portal open the SQL "
             "server -> Networking and add your current client IP."
         )
+    if "4060" in message and "Cannot open database" in message:
+        # The login works but AZURE_SQL_DATABASE names something that is not
+        # there -- ask master what the real database names are.
+        with get_connection("master") as master:
+            names = [
+                row[0] for row in master.cursor().execute(
+                    "SELECT name FROM sys.databases "
+                    "WHERE name <> 'master' ORDER BY name"
+                ).fetchall()
+            ]
+        raise SystemExit(
+            f"There is no database named {DATABASE!r} on this server.\n"
+            f"Databases on the server: {', '.join(names) or '(none)'}\n"
+            "Put the right one in AZURE_SQL_DATABASE in .env."
+        )
     raise
 
 with conn:
