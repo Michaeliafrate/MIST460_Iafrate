@@ -218,8 +218,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 # MIST 460 project -- the template covers .env, but not the variants that
-# turn up next to it (.env.local, timestamped .bak copies). The example file
-# is the one env file that is meant to be committed.
+# turn up next to it (.env.local, timestamped .bak copies).
 .env.*
-!.env.example
 *.bak

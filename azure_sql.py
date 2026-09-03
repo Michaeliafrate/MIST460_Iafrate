@@ -4,7 +4,8 @@ Connects to the logical server at <server>.database.windows.net over ODBC
 Driver 18, which defaults to Encrypt=yes -- Azure SQL refuses unencrypted
 connections, so that default is left alone rather than turned off.
 
-Credentials come from .env (never committed); see .env.example for the keys.
+Credentials come from .env (never committed). Keys: AZURE_SQL_SERVER,
+AZURE_SQL_DATABASE, AZURE_SQL_USER, AZURE_SQL_PASSWORD.
 """
 import os
 
