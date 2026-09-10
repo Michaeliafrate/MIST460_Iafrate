@@ -15,9 +15,9 @@ def update_reservation(
         cursor.execute("exec procUpdateReservation %s, %s, %s, %s, %s",
                        (reservation_id, room_id, slot_date,
                         str(start_time), str(end_time)))
-        cursor.fetchall()
+        rows = cursor.fetchall()
         conn.commit()
-        return {"status_message": f"Reservation {reservation_id} updated successfully."}
+        return {"status_message": rows[0]["StatusMessage"]}
     except Exception as e:
         conn.rollback()
         return {"status_message": f"Error occurred: {e}"}

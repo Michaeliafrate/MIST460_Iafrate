@@ -6,8 +6,9 @@ def check_in(reservation_id: int):
 
     try:
         cursor.execute("exec procCheckIn %s", (reservation_id,))
+        rows = cursor.fetchall()
         conn.commit()
-        return {"status_message": f"Reservation {reservation_id} checked in successfully."}
+        return {"status_message": rows[0]["StatusMessage"]}
     except Exception as e:
         conn.rollback()
         return {"status_message": f"Error occurred: {e}"}

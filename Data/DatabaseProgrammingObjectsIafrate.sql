@@ -1,655 +1,581 @@
-CREATE OR ALTER VIEW viewRoomSchedule
-AS
-SELECT
-    a.RoomAvailabilityID,
-    r.RoomID,
-    r.RoomNumber,
-    r.Floor,
-    r.Seats,
-    r.Whiteboard,
-    a.Date,
-    a.StartTime,
-    a.EndTime,
-    a.AvailabilityStatus,
-    CASE WHEN a.AvailabilityStatus = 1 THEN 'Free' ELSE 'Booked' END AS SlotStatus,
-    a.ReservationID,
-    u.Email       AS BookedByEmail,
-    res.ReservationStatus
-FROM RoomAvailability a
-JOIN Room r
-    ON r.RoomID = a.RoomID
-LEFT JOIN Reservation res
-    ON res.ReservationID = a.ReservationID
-LEFT JOIN AppUser u
-    ON u.AppUserID = res.AppUserID;
-GO
+-- Programming objects for StudyroomSniffer.
+-- Every procedure that changes data returns a StatusMessage column so the
+-- API can show the reason back to the student.
 
-CREATE OR ALTER VIEW viewReservationDetail
-AS
-SELECT
-    res.ReservationID,
-    res.AppUserID,
-    u.Email                              AS UserEmail,
-    u.FirstName + ' ' + u.LastName       AS UserName,
-    rm.RoomID,
-    rm.RoomNumber,
-    rm.Floor,
-    rm.Seats,
-    s.Date,
-    s.StartTime,
-    s.EndTime,
-    s.SlotCount,
-    s.SlotCount * 15                     AS TotalTimeComputed,
-    res.TotalTime                     AS TotalTimeStored,
-    res.ReservationStatus,
-    res.DateTime,
-    res.CheckInDateTime,
-    res.CheckOutDateTime
-FROM Reservation res
-JOIN AppUser u
-    ON u.AppUserID = res.AppUserID
-OUTER APPLY (
-    SELECT
-        MIN(a.Date)  AS Date,
-        MIN(a.StartTime) AS StartTime,
-        MAX(a.EndTime)   AS EndTime,
-        COUNT(*)         AS SlotCount,
-        MIN(a.RoomID)    AS RoomID
-    FROM RoomAvailability a
-    WHERE a.ReservationID = res.ReservationID
-) AS s
-LEFT JOIN Room rm
-    ON rm.RoomID = s.RoomID;
-GO
-
-CREATE OR ALTER FUNCTION dbo.fnReservationMinutes (@ReservationID INT)
-RETURNS INT
-AS
-BEGIN
-    DECLARE @Slots INT;
-
-    SELECT @Slots = COUNT(*)
-    FROM RoomAvailability
-    WHERE ReservationID = @ReservationID;
-
-    RETURN ISNULL(@Slots, 0) * 15;
-END;
-GO
-
-CREATE OR ALTER FUNCTION dbo.fnIsRoomFree
+create or alter procedure procRegisterUser
 (
-    @RoomID    INT,
-    @Date  DATE,
-    @StartTime TIME(0),
-    @EndTime   TIME(0)
+    @FirstName NVARCHAR(50),
+    @LastName NVARCHAR(50),
+    @Email NVARCHAR(100),
+    @Password NVARCHAR(100),
+    @UserRole NVARCHAR(20) = 'Student'
 )
-RETURNS BIT
-AS
-BEGIN
-    DECLARE @Needed INT = DATEDIFF(MINUTE, @StartTime, @EndTime) / 15;
-    DECLARE @Free   INT;
+as
+begin
+    declare @Existing INT;
+    declare @NewAppUserID INT;
 
-    IF @Needed <= 0
-        RETURN 0;
+    select @Existing = count(*) from AppUser where Email = @Email;
 
-    SELECT @Free = COUNT(*)
-    FROM RoomAvailability
-    WHERE RoomID = @RoomID
-      AND Date = @Date
-      AND StartTime >= @StartTime
-      AND StartTime <  @EndTime
-      AND AvailabilityStatus = 1;
+    if (@Existing > 0)
+    begin
+        select 0 as AppUserID, 'That email is already registered.' as StatusMessage;
+        return;
+    end
 
-    RETURN CASE WHEN @Free = @Needed THEN 1 ELSE 0 END;
-END;
+    if (@UserRole <> 'Student' and @UserRole <> 'Admin')
+    begin
+        select 0 as AppUserID, 'UserRole must be Student or Admin.' as StatusMessage;
+        return;
+    end
+
+    insert into AppUser (FirstName, LastName, Email, PasswordHash, UserRole)
+    values (@FirstName, @LastName, @Email, convert(VARBINARY(256), @Password), @UserRole);
+
+    select @NewAppUserID = max(AppUserID) from AppUser;
+
+    select @NewAppUserID as AppUserID, 'User registered successfully.' as StatusMessage;
+end
+
 GO
 
-CREATE OR ALTER PROCEDURE procGenerateSlots
-    @FromDate  DATE,
-    @Days      INT     = 7,
-    @OpenTime  TIME(0) = '08:00:00',
-    @CloseTime TIME(0) = '20:00:00'
-AS
-BEGIN
-    SET NOCOUNT ON;
+-- Requirements 2 and 3: how many people fit, and what the room has.
+create or alter procedure procFindRoom
+(
+    @Floor INT = NULL,
+    @MinSeats INT = NULL,
+    @Whiteboard BIT = NULL
+)
+as
+begin
+    select RoomID, RoomNumber, Floor, Seats, Whiteboard, CurrentStatus
+    from Room
+    where (@Floor IS NULL OR Floor = @Floor)
+      and (@MinSeats IS NULL OR Seats >= @MinSeats)
+      and (@Whiteboard IS NULL OR Whiteboard = @Whiteboard)
+    order by Floor, RoomNumber;
+end
 
-    DECLARE @PerDay INT = DATEDIFF(MINUTE, @OpenTime, @CloseTime) / 15;
-
-    IF @PerDay <= 0
-        THROW 50003, 'Closing time must be after opening time.', 1;
-
-    ;WITH SlotNo AS (
-        SELECT TOP (@PerDay) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) - 1 AS N
-        FROM sys.all_objects
-    ),
-    DayNo AS (
-        SELECT TOP (@Days) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) - 1 AS N
-        FROM sys.all_objects
-    )
-    INSERT INTO RoomAvailability (RoomID, Date, StartTime, EndTime, AvailabilityStatus)
-    SELECT
-        r.RoomID,
-        DATEADD(DAY, d.N, @FromDate),
-        CAST(DATEADD(MINUTE, 15 *  s.N,      @OpenTime) AS TIME(0)),
-        CAST(DATEADD(MINUTE, 15 * (s.N + 1), @OpenTime) AS TIME(0)),
-        1
-    FROM Room r
-    CROSS JOIN DayNo d
-    CROSS JOIN SlotNo s
-    WHERE NOT EXISTS (
-        SELECT 1 FROM RoomAvailability x
-        WHERE x.RoomID    = r.RoomID
-          AND x.Date  = DATEADD(DAY, d.N, @FromDate)
-          AND x.StartTime = CAST(DATEADD(MINUTE, 15 * s.N, @OpenTime) AS TIME(0))
-    );
-
-    SELECT @@ROWCOUNT AS SlotsCreated;
-END;
 GO
 
-CREATE OR ALTER PROCEDURE procCheckAvailability
-    @StartDate       DATE,
-    @EndDate         DATE = NULL,
-    @StartTime       TIME(0),
-    @EndTime         TIME(0),
-    @RoomNumber      VARCHAR(10) = NULL,
-    @Floor           INT = NULL,
-    @MinSeats        INT = NULL,
-    @NeedsWhiteboard BIT = NULL
-AS
-BEGIN
-    SET NOCOUNT ON;
+-- Requirements 1 and 4: which rooms are free for a whole time window.
+-- A room qualifies when every slot it has in that window is free, which is
+-- what min(AvailabilityStatus) = 1 checks.
+create or alter procedure procCheckAvailability
+(
+    @StartDate DATE,
+    @EndDate DATE = NULL,
+    @StartTime TIME,
+    @EndTime TIME,
+    @RoomNumber NVARCHAR(10) = NULL,
+    @Floor INT = NULL,
+    @MinSeats INT = NULL,
+    @Whiteboard BIT = NULL
+)
+as
+begin
+    if (@EndDate IS NULL)
+        set @EndDate = @StartDate;
 
-    IF @EndDate IS NULL
-        SET @EndDate = @StartDate;
+    select a.RoomID, r.RoomNumber, r.Floor, r.Seats, r.Whiteboard, r.CurrentStatus, a.Date
+    from RoomAvailability a
+    inner join Room r on r.RoomID = a.RoomID
+    where a.Date >= @StartDate
+      and a.Date <= @EndDate
+      and a.StartTime >= @StartTime
+      and a.StartTime < @EndTime
+      and (@RoomNumber IS NULL OR r.RoomNumber = @RoomNumber)
+      and (@Floor IS NULL OR r.Floor = @Floor)
+      and (@MinSeats IS NULL OR r.Seats >= @MinSeats)
+      and (@Whiteboard IS NULL OR r.Whiteboard = @Whiteboard)
+    group by a.RoomID, r.RoomNumber, r.Floor, r.Seats, r.Whiteboard, r.CurrentStatus, a.Date
+    having min(cast(a.AvailabilityStatus as INT)) = 1
+    order by a.Date, r.Floor, r.RoomNumber;
+end
 
-    DECLARE @Minutes INT = DATEDIFF(MINUTE, @StartTime, @EndTime);
-
-    IF @Minutes <= 0
-        THROW 50003, 'End time must be after start time.', 1;
-    IF @Minutes % 15 <> 0
-        THROW 50004, 'Times must fall on 15 minute increments.', 1;
-    IF @EndDate < @StartDate
-        THROW 50009, 'End date must not be before start date.', 1;
-
-    DECLARE @Needed INT = @Minutes / 15;
-
-    SELECT
-        d.Date,
-        r.RoomID,
-        r.RoomNumber,
-        r.Floor,
-        r.Seats,
-        r.Whiteboard,
-        r.CurrentStatus,
-        @Minutes AS MinutesRequested
-    FROM Room r
-    CROSS JOIN (
-        SELECT DISTINCT a.Date
-        FROM RoomAvailability a
-        WHERE a.Date BETWEEN @StartDate AND @EndDate
-    ) d
-    WHERE (@RoomNumber      IS NULL OR r.RoomNumber = @RoomNumber)
-      AND (@Floor           IS NULL OR r.Floor      =  @Floor)
-      AND (@MinSeats        IS NULL OR r.Seats      >= @MinSeats)
-      AND (@NeedsWhiteboard IS NULL OR r.Whiteboard =  @NeedsWhiteboard)
-      AND (
-            SELECT COUNT(*)
-            FROM RoomAvailability a
-            WHERE a.RoomID      = r.RoomID
-              AND a.Date        = d.Date
-              AND a.StartTime  >= @StartTime
-              AND a.StartTime   < @EndTime
-              AND a.AvailabilityStatus = 1
-          ) = @Needed
-    ORDER BY d.Date, r.Floor, r.RoomNumber;
-END;
 GO
 
-CREATE OR ALTER PROCEDURE procFindRoomAvailableNow
-    @Minutes  INT = 60,
-    @Floor    INT = NULL,
+-- Requirement 8: find me a room available now. Lists the free slots left
+-- today from the current time onward.
+create or alter procedure procFindRoomAvailableNow
+(
+    @Floor INT = NULL,
     @MinSeats INT = NULL
-AS
-BEGIN
-    SET NOCOUNT ON;
+)
+as
+begin
+    declare @Today DATE;
+    declare @Now TIME;
 
-    DECLARE @NowLocal DATETIME2(0) =
-        CAST(SYSUTCDATETIME() AT TIME ZONE 'UTC'
-                              AT TIME ZONE 'Eastern Standard Time' AS DATETIME2(0));
+    set @Today = cast(GETDATE() as DATE);
+    set @Now = cast(GETDATE() as TIME);
 
-    DECLARE @Date  DATE    = CAST(@NowLocal AS DATE);
-    DECLARE @Clock TIME(0) = CAST(@NowLocal AS TIME(0));
+    select a.RoomID, r.RoomNumber, r.Floor, r.Seats, r.Whiteboard,
+           a.Date, a.StartTime, a.EndTime
+    from RoomAvailability a
+    inner join Room r on r.RoomID = a.RoomID
+    where a.Date = @Today
+      and a.StartTime >= @Now
+      and a.AvailabilityStatus = 1
+      and (@Floor IS NULL OR r.Floor = @Floor)
+      and (@MinSeats IS NULL OR r.Seats >= @MinSeats)
+    order by a.StartTime, r.RoomNumber;
+end
 
-    DECLARE @Start TIME(0) = CAST(DATEADD(
-            MINUTE,
-            (DATEDIFF(MINUTE, CAST('00:00:00' AS TIME(0)), @Clock) / 15) * 15,
-            CAST('00:00:00' AS TIME(0))) AS TIME(0));
-
-    DECLARE @End TIME(0) = CAST(DATEADD(MINUTE, @Minutes, @Start) AS TIME(0));
-
-    SELECT @NowLocal AS LocalNow, @Date AS SearchDate,
-           @Start AS FromTime, @End AS ToTime;
-
-    EXEC procCheckAvailability @Date, @Date, @Start, @End, NULL, @Floor, @MinSeats, NULL;
-END;
 GO
 
-CREATE OR ALTER PROCEDURE procRegisterUser
-    @Email     NVARCHAR(255),
-    @Password  NVARCHAR(200),
-    @FirstName NVARCHAR(50) = NULL,
-    @LastName  NVARCHAR(50) = NULL,
-    @UserRole  VARCHAR(10)  = 'Student'
-AS
-BEGIN
-    SET NOCOUNT ON;
-
-    IF EXISTS (SELECT 1 FROM AppUser WHERE Email = @Email)
-        THROW 50018, 'That email is already registered.', 1;
-
-    IF @UserRole NOT IN ('Student', 'Admin')
-        THROW 50019, 'UserRole must be Student or Admin.', 1;
-
-    INSERT INTO AppUser (Email, PasswordHash, FirstName, LastName, UserRole)
-    VALUES (
-        @Email,
-        HASHBYTES('SHA2_256', CAST(@Email + '|' + @Password AS VARCHAR(500))),
-        @FirstName,
-        @LastName,
-        @UserRole
-    );
-
-    SELECT SCOPE_IDENTITY() AS AppUserID;
-END;
-GO
-
-CREATE OR ALTER PROCEDURE procFindRoom
-    @Floor           INT = NULL,
-    @MinSeats        INT = NULL,
-    @NeedsWhiteboard BIT = NULL
-AS
-BEGIN
-    SET NOCOUNT ON;
-
-    SELECT RoomID, RoomNumber, Floor, Seats, Whiteboard, CurrentStatus
-    FROM Room
-    WHERE (@Floor           IS NULL OR Floor      =  @Floor)
-      AND (@MinSeats        IS NULL OR Seats      >= @MinSeats)
-      AND (@NeedsWhiteboard IS NULL OR Whiteboard =  @NeedsWhiteboard)
-    ORDER BY Floor, RoomNumber;
-END;
-GO
-
-CREATE OR ALTER PROCEDURE procGetRoomSchedule
+-- Requirement 4: the slot by slot picture for a day.
+create or alter procedure procGetRoomSchedule
+(
     @Date DATE,
-    @RoomID   INT = NULL,
+    @RoomID INT = NULL,
     @FreeOnly BIT = 0
-AS
-BEGIN
-    SET NOCOUNT ON;
+)
+as
+begin
+    select r.RoomID, r.RoomNumber, r.Floor, r.Seats,
+           a.Date, a.StartTime, a.EndTime,
+           a.AvailabilityStatus,
+           a.ReservationID, u.Email as BookedByEmail, res.ReservationStatus
+    from RoomAvailability a
+    inner join Room r on r.RoomID = a.RoomID
+    left join Reservation res on res.ReservationID = a.ReservationID
+    left join AppUser u on u.AppUserID = res.AppUserID
+    where a.Date = @Date
+      and (@RoomID IS NULL OR a.RoomID = @RoomID)
+      and (@FreeOnly = 0 OR a.AvailabilityStatus = 1)
+    order by r.RoomNumber, a.StartTime;
+end
 
-    SELECT RoomID, RoomNumber, Floor, Seats, Date, StartTime, EndTime,
-           SlotStatus, ReservationID, BookedByEmail, ReservationStatus
-    FROM viewRoomSchedule
-    WHERE Date = @Date
-      AND (@RoomID IS NULL OR RoomID = @RoomID)
-      AND (@FreeOnly = 0 OR AvailabilityStatus = 1)
-    ORDER BY RoomNumber, StartTime;
-END;
 GO
 
-CREATE OR ALTER PROCEDURE procGetAllReservations
-    @AppUserID         INT = NULL,
-    @ReservationStatus VARCHAR(12) = NULL
-AS
-BEGIN
-    SET NOCOUNT ON;
+-- One row per reservation. Cancelled reservations hold no slots, so the
+-- joins to RoomAvailability and Room have to be left joins.
+create or alter procedure procGetAllReservations
+(
+    @AppUserID INT = NULL,
+    @ReservationStatus NVARCHAR(20) = NULL
+)
+as
+begin
+    select res.ReservationID, res.AppUserID, u.Email as UserEmail,
+           u.FirstName + ' ' + u.LastName as UserName,
+           max(r.RoomNumber) as RoomNumber,
+           max(a.Date) as Date,
+           min(a.StartTime) as StartTime,
+           max(a.EndTime) as EndTime,
+           count(a.RoomAvailabilityID) as SlotCount,
+           res.TotalTime, res.ReservationStatus,
+           res.DateTime, res.CheckInDateTime, res.CheckOutDateTime
+    from Reservation res
+    inner join AppUser u on u.AppUserID = res.AppUserID
+    left join RoomAvailability a on a.ReservationID = res.ReservationID
+    left join Room r on r.RoomID = a.RoomID
+    where (@AppUserID IS NULL OR res.AppUserID = @AppUserID)
+      and (@ReservationStatus IS NULL OR res.ReservationStatus = @ReservationStatus)
+    group by res.ReservationID, res.AppUserID, u.Email, u.FirstName, u.LastName,
+             res.TotalTime, res.ReservationStatus,
+             res.DateTime, res.CheckInDateTime, res.CheckOutDateTime
+    order by res.ReservationID;
+end
 
-    SELECT *
-    FROM viewReservationDetail
-    WHERE (@AppUserID         IS NULL OR AppUserID         = @AppUserID)
-      AND (@ReservationStatus IS NULL OR ReservationStatus = @ReservationStatus)
-    ORDER BY ReservationID DESC;
-END;
 GO
 
-CREATE OR ALTER PROCEDURE procGetReservationByID
+create or alter procedure procGetReservationByID
+(
     @ReservationID INT
-AS
-BEGIN
-    SET NOCOUNT ON;
+)
+as
+begin
+    select res.ReservationID, res.AppUserID, u.Email as UserEmail,
+           u.FirstName + ' ' + u.LastName as UserName,
+           max(r.RoomNumber) as RoomNumber,
+           max(a.Date) as Date,
+           min(a.StartTime) as StartTime,
+           max(a.EndTime) as EndTime,
+           count(a.RoomAvailabilityID) as SlotCount,
+           count(a.RoomAvailabilityID) * 15 as TotalTimeFromSlots,
+           res.TotalTime, res.ReservationStatus,
+           res.DateTime, res.CheckInDateTime, res.CheckOutDateTime
+    from Reservation res
+    inner join AppUser u on u.AppUserID = res.AppUserID
+    left join RoomAvailability a on a.ReservationID = res.ReservationID
+    left join Room r on r.RoomID = a.RoomID
+    where res.ReservationID = @ReservationID
+    group by res.ReservationID, res.AppUserID, u.Email, u.FirstName, u.LastName,
+             res.TotalTime, res.ReservationStatus,
+             res.DateTime, res.CheckInDateTime, res.CheckOutDateTime;
+end
 
-    SELECT *, dbo.fnReservationMinutes(@ReservationID) AS TotalTimeFromSlots
-    FROM viewReservationDetail
-    WHERE ReservationID = @ReservationID;
-END;
 GO
 
-CREATE OR ALTER PROCEDURE procMakeReservation
-    @AppUserID     INT,
-    @RoomID        INT,
-    @Date          DATE,
-    @StartTime     TIME(0),
-    @EndTime       TIME(0),
-    @ReservationID INT OUTPUT
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SET XACT_ABORT ON;
+-- Requirements 5 and 6: book a room in 15 minute steps, at most 2 hours, and
+-- never two rooms at the same moment for the same student.
+create or alter procedure procMakeReservation
+(
+    @AppUserID INT,
+    @RoomID INT,
+    @Date DATE,
+    @StartTime TIME,
+    @EndTime TIME
+)
+as
+begin
+    declare @UserCount INT;
+    declare @RoomCount INT;
+    declare @TotalTime INT;
+    declare @NeededSlots INT;
+    declare @FreeSlots INT;
+    declare @Conflicts INT;
+    declare @ReservationID INT;
 
-    IF NOT EXISTS (SELECT 1 FROM AppUser WHERE AppUserID = @AppUserID)
-        THROW 50001, 'No such user.', 1;
+    select @UserCount = count(*) from AppUser where AppUserID = @AppUserID;
+    if (@UserCount = 0)
+    begin
+        select 0 as ReservationID, 'No such user.' as StatusMessage;
+        return;
+    end
 
-    IF NOT EXISTS (SELECT 1 FROM Room WHERE RoomID = @RoomID)
-        THROW 50002, 'No such room.', 1;
+    select @RoomCount = count(*) from Room where RoomID = @RoomID;
+    if (@RoomCount = 0)
+    begin
+        select 0 as ReservationID, 'No such room.' as StatusMessage;
+        return;
+    end
 
-    DECLARE @Minutes INT = DATEDIFF(MINUTE, @StartTime, @EndTime);
+    set @TotalTime = datediff(minute, @StartTime, @EndTime);
 
-    IF @Minutes <= 0
-        THROW 50003, 'End time must be after start time.', 1;
+    if (@TotalTime <= 0)
+    begin
+        select 0 as ReservationID, 'End time must be after start time.' as StatusMessage;
+        return;
+    end
 
-    IF @Minutes % 15 <> 0
-        THROW 50004, 'Reservations must be in 15 minute increments.', 1;
+    if (@TotalTime % 15 <> 0)
+    begin
+        select 0 as ReservationID, 'Reservations must be in 15 minute increments.' as StatusMessage;
+        return;
+    end
 
-    IF @Minutes > 120
-        THROW 50005, 'A reservation cannot be longer than 2 hours.', 1;
+    if (@TotalTime > 120)
+    begin
+        select 0 as ReservationID, 'A reservation cannot be longer than 2 hours.' as StatusMessage;
+        return;
+    end
 
-    IF @Date < CAST(SYSUTCDATETIME() AT TIME ZONE 'UTC'
-                        AT TIME ZONE 'Eastern Standard Time' AS DATE)
-        THROW 50006, 'That date is in the past.', 1;
+    if (@Date < cast(GETDATE() as DATE))
+    begin
+        select 0 as ReservationID, 'That date is in the past.' as StatusMessage;
+        return;
+    end
 
-    IF dbo.fnIsRoomFree(@RoomID, @Date, @StartTime, @EndTime) = 0
-        THROW 50007, 'That room is not free for the whole time requested.', 1;
+    set @NeededSlots = @TotalTime / 15;
 
-    DECLARE @Needed INT = @Minutes / 15;
+    select @FreeSlots = count(*)
+    from RoomAvailability
+    where RoomID = @RoomID
+      and Date = @Date
+      and StartTime >= @StartTime
+      and StartTime < @EndTime
+      and AvailabilityStatus = 1;
 
-    BEGIN TRANSACTION;
+    if (@FreeSlots <> @NeededSlots)
+    begin
+        select 0 as ReservationID, 'That room is not free for the whole time requested.' as StatusMessage;
+        return;
+    end
 
-        INSERT INTO Reservation (AppUserID, TotalTime, ReservationStatus)
-        VALUES (@AppUserID, @Minutes, 'Booked');
+    select @Conflicts = count(*)
+    from RoomAvailability a
+    inner join Reservation res on res.ReservationID = a.ReservationID
+    where a.Date = @Date
+      and a.StartTime >= @StartTime
+      and a.StartTime < @EndTime
+      and res.AppUserID = @AppUserID
+      and res.ReservationStatus <> 'Cancelled';
 
-        SET @ReservationID = SCOPE_IDENTITY();
+    if (@Conflicts > 0)
+    begin
+        select 0 as ReservationID, 'That user already has another room booked at the same time.' as StatusMessage;
+        return;
+    end
 
-        UPDATE RoomAvailability
-        SET ReservationID      = @ReservationID,
-            AvailabilityStatus = 0
-        WHERE RoomID    = @RoomID
-          AND Date      = @Date
-          AND StartTime >= @StartTime
-          AND StartTime <  @EndTime
-          AND AvailabilityStatus = 1;
+    insert into Reservation (AppUserID, TotalTime, ReservationStatus)
+    values (@AppUserID, @TotalTime, 'Booked');
 
-        IF @@ROWCOUNT <> @Needed
-            THROW 50008, 'Someone booked part of that time first. Try again.', 1;
+    select @ReservationID = max(ReservationID) from Reservation;
 
-    COMMIT TRANSACTION;
+    update RoomAvailability
+    set ReservationID = @ReservationID,
+        AvailabilityStatus = 0
+    where RoomID = @RoomID
+      and Date = @Date
+      and StartTime >= @StartTime
+      and StartTime < @EndTime;
 
-    SELECT @ReservationID AS ReservationID;
-END;
+    select @ReservationID as ReservationID, 'Reservation created successfully.' as StatusMessage;
+end
+
 GO
 
-CREATE OR ALTER PROCEDURE procUpdateReservation
+-- Move or resize a booking. The old slots are released first so a booking
+-- can be extended in the room it already sits in.
+create or alter procedure procUpdateReservation
+(
     @ReservationID INT,
-    @RoomID        INT,
-    @Date          DATE,
-    @StartTime     TIME(0),
-    @EndTime       TIME(0)
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SET XACT_ABORT ON;
+    @RoomID INT,
+    @Date DATE,
+    @StartTime TIME,
+    @EndTime TIME
+)
+as
+begin
+    declare @Status NVARCHAR(20);
+    declare @AppUserID INT;
+    declare @RoomCount INT;
+    declare @TotalTime INT;
+    declare @NeededSlots INT;
+    declare @FreeSlots INT;
+    declare @Conflicts INT;
 
-    IF NOT EXISTS (SELECT 1 FROM Reservation WHERE ReservationID = @ReservationID)
-        THROW 50017, 'No such reservation.', 1;
+    select @Status = ReservationStatus, @AppUserID = AppUserID
+    from Reservation where ReservationID = @ReservationID;
 
-    IF NOT EXISTS (SELECT 1 FROM Room WHERE RoomID = @RoomID)
-        THROW 50002, 'No such room.', 1;
+    if (@Status IS NULL)
+    begin
+        select 'No such reservation.' as StatusMessage;
+        return;
+    end
 
-    IF (SELECT ReservationStatus FROM Reservation WHERE ReservationID = @ReservationID) <> 'Booked'
-        THROW 50016, 'Only a booked reservation can be updated.', 1;
+    if (@Status <> 'Booked')
+    begin
+        select 'Only a booked reservation can be updated.' as StatusMessage;
+        return;
+    end
 
-    DECLARE @Minutes INT = DATEDIFF(MINUTE, @StartTime, @EndTime);
+    select @RoomCount = count(*) from Room where RoomID = @RoomID;
+    if (@RoomCount = 0)
+    begin
+        select 'No such room.' as StatusMessage;
+        return;
+    end
 
-    IF @Minutes <= 0
-        THROW 50003, 'End time must be after start time.', 1;
+    set @TotalTime = datediff(minute, @StartTime, @EndTime);
 
-    IF @Minutes % 15 <> 0
-        THROW 50004, 'Reservations must be in 15 minute increments.', 1;
+    if (@TotalTime <= 0)
+    begin
+        select 'End time must be after start time.' as StatusMessage;
+        return;
+    end
 
-    IF @Minutes > 120
-        THROW 50005, 'A reservation cannot be longer than 2 hours.', 1;
+    if (@TotalTime % 15 <> 0)
+    begin
+        select 'Reservations must be in 15 minute increments.' as StatusMessage;
+        return;
+    end
 
-    IF @Date < CAST(SYSUTCDATETIME() AT TIME ZONE 'UTC'
-                        AT TIME ZONE 'Eastern Standard Time' AS DATE)
-        THROW 50006, 'That date is in the past.', 1;
+    if (@TotalTime > 120)
+    begin
+        select 'A reservation cannot be longer than 2 hours.' as StatusMessage;
+        return;
+    end
 
-    DECLARE @Needed INT = @Minutes / 15;
+    set @NeededSlots = @TotalTime / 15;
 
-    BEGIN TRANSACTION;
+    -- Count the slots this reservation could take: free ones, plus the ones
+    -- it already holds itself.
+    select @FreeSlots = count(*)
+    from RoomAvailability
+    where RoomID = @RoomID
+      and Date = @Date
+      and StartTime >= @StartTime
+      and StartTime < @EndTime
+      and (AvailabilityStatus = 1 OR ReservationID = @ReservationID);
 
-        UPDATE RoomAvailability
-        SET ReservationID      = NULL,
-            AvailabilityStatus = 1
-        WHERE ReservationID = @ReservationID;
+    if (@FreeSlots <> @NeededSlots)
+    begin
+        select 'That room is not free for the whole time requested.' as StatusMessage;
+        return;
+    end
 
-        UPDATE RoomAvailability
-        SET ReservationID      = @ReservationID,
-            AvailabilityStatus = 0
-        WHERE RoomID    = @RoomID
-          AND Date      = @Date
-          AND StartTime >= @StartTime
-          AND StartTime <  @EndTime
-          AND AvailabilityStatus = 1;
+    -- Any other reservation this student holds at the same time blocks the
+    -- move. The reservation being changed is excluded from the count.
+    select @Conflicts = count(*)
+    from RoomAvailability a
+    inner join Reservation res on res.ReservationID = a.ReservationID
+    where a.Date = @Date
+      and a.StartTime >= @StartTime
+      and a.StartTime < @EndTime
+      and res.AppUserID = @AppUserID
+      and res.ReservationID <> @ReservationID
+      and res.ReservationStatus <> 'Cancelled';
 
-        IF @@ROWCOUNT <> @Needed
-            THROW 50007, 'That room is not free for the whole time requested.', 1;
+    if (@Conflicts > 0)
+    begin
+        select 'That user already has another room booked at the same time.' as StatusMessage;
+        return;
+    end
 
-        UPDATE Reservation
-        SET TotalTime = @Minutes
-        WHERE ReservationID = @ReservationID;
+    update RoomAvailability
+    set ReservationID = NULL,
+        AvailabilityStatus = 1
+    where ReservationID = @ReservationID;
 
-    COMMIT TRANSACTION;
+    update RoomAvailability
+    set ReservationID = @ReservationID,
+        AvailabilityStatus = 0
+    where RoomID = @RoomID
+      and Date = @Date
+      and StartTime >= @StartTime
+      and StartTime < @EndTime;
 
-    SELECT @ReservationID AS ReservationID;
-END;
+    update Reservation
+    set TotalTime = @TotalTime
+    where ReservationID = @ReservationID;
+
+    select 'Reservation updated successfully.' as StatusMessage;
+end
+
 GO
 
-CREATE OR ALTER PROCEDURE procCancelReservation
+-- Cancelling frees the slots but keeps the reservation row as history.
+create or alter procedure procCancelReservation
+(
     @ReservationID INT
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SET XACT_ABORT ON;
+)
+as
+begin
+    declare @Status NVARCHAR(20);
+    declare @RoomID INT;
 
-    IF NOT EXISTS (SELECT 1 FROM Reservation WHERE ReservationID = @ReservationID)
-        THROW 50017, 'No such reservation.', 1;
+    select @Status = ReservationStatus from Reservation where ReservationID = @ReservationID;
 
-    IF EXISTS (SELECT 1 FROM Reservation
-               WHERE ReservationID = @ReservationID AND ReservationStatus = 'Cancelled')
-        THROW 50016, 'That reservation is already cancelled.', 1;
+    if (@Status IS NULL)
+    begin
+        select 'No such reservation.' as StatusMessage;
+        return;
+    end
 
-    BEGIN TRANSACTION;
+    if (@Status = 'Cancelled')
+    begin
+        select 'That reservation is already cancelled.' as StatusMessage;
+        return;
+    end
 
-        UPDATE RoomAvailability
-        SET ReservationID      = NULL,
-            AvailabilityStatus = 1
-        WHERE ReservationID = @ReservationID;
+    select @RoomID = max(RoomID) from RoomAvailability where ReservationID = @ReservationID;
 
-        UPDATE Reservation
-        SET ReservationStatus = 'Cancelled'
-        WHERE ReservationID = @ReservationID;
+    update RoomAvailability
+    set ReservationID = NULL,
+        AvailabilityStatus = 1
+    where ReservationID = @ReservationID;
 
-    COMMIT TRANSACTION;
-END;
+    update Reservation
+    set ReservationStatus = 'Cancelled'
+    where ReservationID = @ReservationID;
+
+    if (@RoomID IS NOT NULL)
+        update Room set CurrentStatus = 'Available' where RoomID = @RoomID;
+
+    select 'Reservation cancelled successfully.' as StatusMessage;
+end
+
 GO
 
-CREATE OR ALTER PROCEDURE procCheckIn
+-- Requirement 7, first half.
+create or alter procedure procCheckIn
+(
     @ReservationID INT
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SET XACT_ABORT ON;
+)
+as
+begin
+    declare @Status NVARCHAR(20);
+    declare @RoomID INT;
 
-    IF NOT EXISTS (SELECT 1 FROM Reservation WHERE ReservationID = @ReservationID)
-        THROW 50017, 'No such reservation.', 1;
+    select @Status = ReservationStatus from Reservation where ReservationID = @ReservationID;
 
-    IF NOT EXISTS (SELECT 1 FROM Reservation
-                   WHERE ReservationID = @ReservationID AND ReservationStatus = 'Booked')
-        THROW 50016, 'Only a booked reservation can be checked in.', 1;
+    if (@Status IS NULL)
+    begin
+        select 'No such reservation.' as StatusMessage;
+        return;
+    end
 
-    BEGIN TRANSACTION;
+    if (@Status <> 'Booked')
+    begin
+        select 'Only a booked reservation can be checked in.' as StatusMessage;
+        return;
+    end
 
-        UPDATE Reservation
-        SET CheckInDateTime   = SYSUTCDATETIME(),
-            ReservationStatus = 'CheckedIn'
-        WHERE ReservationID = @ReservationID;
+    update Reservation
+    set ReservationStatus = 'CheckedIn',
+        CheckInDateTime = GETDATE()
+    where ReservationID = @ReservationID;
 
-        UPDATE r
-        SET r.CurrentStatus = 'In use'
-        FROM Room r
-        WHERE r.RoomID IN (
-            SELECT a.RoomID FROM RoomAvailability a
-            WHERE a.ReservationID = @ReservationID
-        );
+    select @RoomID = max(RoomID) from RoomAvailability where ReservationID = @ReservationID;
 
-    COMMIT TRANSACTION;
-END;
+    if (@RoomID IS NOT NULL)
+        update Room set CurrentStatus = 'In use' where RoomID = @RoomID;
+
+    select 'Reservation checked in successfully.' as StatusMessage;
+end
+
 GO
 
-CREATE OR ALTER PROCEDURE procCheckOut
+-- Requirement 7, second half.
+create or alter procedure procCheckOut
+(
     @ReservationID INT
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SET XACT_ABORT ON;
+)
+as
+begin
+    declare @Status NVARCHAR(20);
+    declare @RoomID INT;
 
-    IF NOT EXISTS (SELECT 1 FROM Reservation WHERE ReservationID = @ReservationID)
-        THROW 50017, 'No such reservation.', 1;
+    select @Status = ReservationStatus from Reservation where ReservationID = @ReservationID;
 
-    IF NOT EXISTS (SELECT 1 FROM Reservation
-                   WHERE ReservationID = @ReservationID AND ReservationStatus = 'CheckedIn')
-        THROW 50016, 'Only a checked-in reservation can be checked out.', 1;
+    if (@Status IS NULL)
+    begin
+        select 'No such reservation.' as StatusMessage;
+        return;
+    end
 
-    BEGIN TRANSACTION;
+    if (@Status <> 'CheckedIn')
+    begin
+        select 'Only a checked-in reservation can be checked out.' as StatusMessage;
+        return;
+    end
 
-        UPDATE Reservation
-        SET CheckOutDateTime  = SYSUTCDATETIME(),
-            ReservationStatus = 'Completed'
-        WHERE ReservationID = @ReservationID;
+    update Reservation
+    set ReservationStatus = 'Completed',
+        CheckOutDateTime = GETDATE()
+    where ReservationID = @ReservationID;
 
-        UPDATE r
-        SET r.CurrentStatus = 'Available'
-        FROM Room r
-        WHERE r.RoomID IN (
-            SELECT a.RoomID FROM RoomAvailability a
-            WHERE a.ReservationID = @ReservationID
-        );
+    select @RoomID = max(RoomID) from RoomAvailability where ReservationID = @ReservationID;
 
-    COMMIT TRANSACTION;
-END;
+    if (@RoomID IS NOT NULL)
+        update Room set CurrentStatus = 'Available' where RoomID = @RoomID;
+
+    select 'Reservation checked out successfully.' as StatusMessage;
+end
+
 GO
 
-CREATE OR ALTER TRIGGER trgEnforceReservationRules
-ON RoomAvailability
-AFTER INSERT, UPDATE
-AS
-BEGIN
-    SET NOCOUNT ON;
-
-    IF NOT EXISTS (SELECT 1 FROM inserted WHERE ReservationID IS NOT NULL)
-       AND NOT EXISTS (SELECT 1 FROM deleted WHERE ReservationID IS NOT NULL)
-        RETURN;
-
-    ;WITH Affected AS (
-        SELECT ReservationID FROM inserted WHERE ReservationID IS NOT NULL
-        UNION
-        SELECT ReservationID FROM deleted  WHERE ReservationID IS NOT NULL
-    ),
-    Shape AS (
-        SELECT
-            a.ReservationID,
-            COUNT(*)                    AS SlotCount,
-            COUNT(DISTINCT a.RoomID)    AS RoomCount,
-            COUNT(DISTINCT a.Date)  AS DayCount,
-            MIN(a.StartTime)            AS MinStart,
-            MAX(a.StartTime)            AS MaxStart
-        FROM RoomAvailability a
-        JOIN Affected f ON f.ReservationID = a.ReservationID
-        GROUP BY a.ReservationID
-    )
-    SELECT *
-    INTO #Shape
-    FROM Shape;
-
-    IF EXISTS (SELECT 1 FROM #Shape WHERE RoomCount > 1)
-    BEGIN
-        ROLLBACK TRANSACTION;
-        THROW 50010, 'All slots in a reservation must be in the same room.', 1;
-    END;
-
-    IF EXISTS (SELECT 1 FROM #Shape WHERE DayCount > 1)
-    BEGIN
-        ROLLBACK TRANSACTION;
-        THROW 50011, 'A reservation cannot span more than one day.', 1;
-    END;
-
-    IF EXISTS (SELECT 1 FROM #Shape WHERE SlotCount > 8)
-    BEGIN
-        ROLLBACK TRANSACTION;
-        THROW 50012, 'A reservation cannot be longer than 2 hours.', 1;
-    END;
-
-    IF EXISTS (
-        SELECT 1 FROM #Shape
-        WHERE DATEDIFF(MINUTE, MinStart, MaxStart) <> (SlotCount - 1) * 15
-    )
-    BEGIN
-        ROLLBACK TRANSACTION;
-        THROW 50013, 'The slots in a reservation must be consecutive.', 1;
-    END;
-
-    IF EXISTS (
-        SELECT 1
-        FROM RoomAvailability mine
-        JOIN #Shape       AS f  ON f.ReservationID = mine.ReservationID
-        JOIN Reservation r1 ON r1.ReservationID = mine.ReservationID
-        JOIN RoomAvailability other
-             ON  other.Date  = mine.Date
-             AND other.StartTime = mine.StartTime
-             AND other.ReservationID IS NOT NULL
-             AND other.ReservationID <> mine.ReservationID
-        JOIN Reservation r2 ON r2.ReservationID = other.ReservationID
-        WHERE r1.AppUserID = r2.AppUserID
-          AND r1.ReservationStatus <> 'Cancelled'
-          AND r2.ReservationStatus <> 'Cancelled'
-    )
-    BEGIN
-        ROLLBACK TRANSACTION;
-        THROW 50014, 'That user already has another room booked at the same time.', 1;
-    END;
-
-    DROP TABLE #Shape;
-END;
 GO
 
-CREATE OR ALTER TRIGGER trgProtectCancelledReservation
-ON Reservation
-AFTER UPDATE
-AS
-BEGIN
-    SET NOCOUNT ON;
+-- A cancelled reservation is history. Cancelling already handed its slots
+-- back to the pool, so putting the status back to 'Booked' would leave two
+-- students holding the same room. rollback transaction undoes whichever
+-- update set the trigger off.
+create or alter trigger trgProtectCancelledReservation
+on Reservation
+after update
+as
+begin
+    declare @OldStatus NVARCHAR(20);
+    declare @NewStatus NVARCHAR(20);
 
-    IF EXISTS (
-        SELECT 1
-        FROM deleted d
-        JOIN inserted i ON i.ReservationID = d.ReservationID
-        WHERE d.ReservationStatus = 'Cancelled'
-          AND i.ReservationStatus <> 'Cancelled'
-    )
-    BEGIN
-        ROLLBACK TRANSACTION;
-        THROW 50015, 'A cancelled reservation cannot be reopened. Make a new one.', 1;
-    END;
-END;
-GO
+    select @OldStatus = ReservationStatus from deleted;
+    select @NewStatus = ReservationStatus from inserted;
+
+    if (@OldStatus = 'Cancelled' and @NewStatus <> 'Cancelled')
+        rollback transaction;
+end

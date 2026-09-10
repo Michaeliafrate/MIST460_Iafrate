@@ -1,112 +1,78 @@
-DELETE FROM RoomAvailability;
-DELETE FROM Reservation;
-DELETE FROM Room;
-DELETE FROM AppUser;
-GO
+-- Run CreateTableIafrate.sql first. That drops and recreates the tables, so
+-- the identity numbers below always start at 1.
 
-SET IDENTITY_INSERT AppUser ON;
+insert into AppUser (FirstName, LastName, Email, PasswordHash, UserRole)
+values ('Michael', 'Iafrate',   'miafrate@mix.wvu.edu',   0x01, 'Student'),
+       ('Carter',  'Reed',      'ccarter@mix.wvu.edu',    0x01, 'Student'),
+       ('Dana',    'Whitfield', 'dwhitfield@mix.wvu.edu', 0x01, 'Student'),
+       ('Priya',   'Raman',     'praman@mix.wvu.edu',     0x01, 'Student'),
+       ('Jordan',  'Bennett',   'jbennett@mail.wvu.edu',  0x01, 'Admin');
 
-INSERT INTO AppUser (AppUserID, Email, PasswordHash, FirstName, LastName, UserRole) VALUES
-    (1, 'miafrate@mix.wvu.edu',   0x01, 'Michael',  'Iafrate',   'Student'),
-    (2, 'ccarter@mix.wvu.edu',    0x01, 'Carter',   'Reed',      'Student'),
-    (3, 'dwhitfield@mix.wvu.edu', 0x01, 'Dana',     'Whitfield', 'Student'),
-    (4, 'praman@mix.wvu.edu',     0x01, 'Priya',    'Raman',     'Student'),
-    (5, 'jbennett@mail.wvu.edu',  0x01, 'Jordan',   'Bennett',   'Admin');
+go
 
-SET IDENTITY_INSERT AppUser OFF;
-DBCC CHECKIDENT ('AppUser', RESEED) WITH NO_INFOMSGS;
-GO
+-- Room 230 reads 'In use' because reservation 4 below is checked in.
+insert into Room (RoomNumber, Floor, Seats, Whiteboard, CurrentStatus)
+values ('130', 1,  4, 1, 'Available'),
+       ('225', 2,  6, 1, 'Available'),
+       ('230', 2,  4, 0, 'In use'),
+       ('335', 3,  8, 1, 'Available'),
+       ('450', 4, 12, 1, 'Available');
 
-SET IDENTITY_INSERT Room ON;
+go
 
-INSERT INTO Room (RoomID, RoomNumber, Floor, Seats, Whiteboard, CurrentStatus) VALUES
-    (1, '130', 1,  4, 1, 'Available'),
-    (2, '225', 2,  6, 1, 'Available'),
-    (3, '230', 2,  4, 0, 'Available'),
-    (4, '335', 3,  8, 1, 'Available'),
-    (5, '450', 4, 12, 1, 'Available');
+-- Reservation 5 is cancelled, so no availability rows point at it below.
+insert into Reservation (AppUserID, CheckInDateTime, CheckOutDateTime, TotalTime, ReservationStatus)
+values (1, NULL,      NULL,      30, 'Booked'),
+       (2, NULL,      NULL,      30, 'Booked'),
+       (1, NULL,      NULL,      30, 'Booked'),
+       (3, GETDATE(), NULL,      45, 'CheckedIn'),
+       (4, NULL,      NULL,      30, 'Cancelled'),
+       (5, NULL,      NULL,      30, 'Booked'),
+       (2, GETDATE(), GETDATE(), 30, 'Completed'),
+       (3, NULL,      NULL,      30, 'Booked'),
+       (4, NULL,      NULL,      30, 'Booked'),
+       (1, NULL,      NULL,      15, 'Booked');
 
-SET IDENTITY_INSERT Room OFF;
-DBCC CHECKIDENT ('Room', RESEED) WITH NO_INFOMSGS;
-GO
+go
 
-DECLARE @Today DATE = CAST(SYSDATETIME() AS DATE);
+-- Five 15 minute slots per room for today, 08:00 to 09:15.
+-- AvailabilityStatus 1 means free, 0 means taken by the reservation named.
+declare @Today DATE = cast(GETDATE() as DATE);
 
-WITH SlotNo AS (
-    SELECT TOP (5) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) - 1 AS N
-    FROM sys.all_objects
-)
-INSERT INTO RoomAvailability (RoomID, Date, StartTime, EndTime, AvailabilityStatus)
-SELECT
-    r.RoomID,
-    @Today,
-    CAST(DATEADD(MINUTE, 15 *  s.N,      CAST('08:00:00' AS TIME(0))) AS TIME(0)),
-    CAST(DATEADD(MINUTE, 15 * (s.N + 1), CAST('08:00:00' AS TIME(0))) AS TIME(0)),
-    1
-FROM Room r
-CROSS JOIN SlotNo s;
+insert into RoomAvailability (RoomID, Date, StartTime, EndTime, AvailabilityStatus, ReservationID)
+values (1, @Today, '08:00', '08:15', 0, 1),
+       (1, @Today, '08:15', '08:30', 0, 1),
+       (1, @Today, '08:30', '08:45', 0, 3),
+       (1, @Today, '08:45', '09:00', 0, 3),
+       (1, @Today, '09:00', '09:15', 1, NULL),
 
-SET IDENTITY_INSERT Reservation ON;
+       (2, @Today, '08:00', '08:15', 0, 2),
+       (2, @Today, '08:15', '08:30', 0, 2),
+       (2, @Today, '08:30', '08:45', 1, NULL),
+       (2, @Today, '08:45', '09:00', 0, 8),
+       (2, @Today, '09:00', '09:15', 0, 8),
 
-INSERT INTO Reservation (ReservationID, AppUserID, DateTime, CheckInDateTime, CheckOutDateTime, TotalTime, ReservationStatus) VALUES
-    (1,  1, SYSUTCDATETIME(), NULL, NULL, 30, 'Booked'),
-    (2,  2, SYSUTCDATETIME(), NULL, NULL, 30, 'Booked'),
-    (3,  1, SYSUTCDATETIME(), NULL, NULL, 30, 'Booked'),
-    (4,  3, SYSUTCDATETIME(), SYSUTCDATETIME(), NULL, 45, 'CheckedIn'),
-    (5,  4, SYSUTCDATETIME(), NULL, NULL, 30, 'Cancelled'),
-    (6,  5, SYSUTCDATETIME(), NULL, NULL, 30, 'Booked'),
-    (7,  2, SYSUTCDATETIME(), DATEADD(HOUR, -3, SYSUTCDATETIME()),
-                              DATEADD(HOUR, -2, SYSUTCDATETIME()), 30, 'Completed'),
-    (8,  3, SYSUTCDATETIME(), NULL, NULL, 30, 'Booked'),
-    (9,  4, SYSUTCDATETIME(), NULL, NULL, 30, 'Booked'),
-    (10, 1, SYSUTCDATETIME(), NULL, NULL, 15, 'Booked');
+       (3, @Today, '08:00', '08:15', 0, 4),
+       (3, @Today, '08:15', '08:30', 0, 4),
+       (3, @Today, '08:30', '08:45', 0, 4),
+       (3, @Today, '08:45', '09:00', 1, NULL),
+       (3, @Today, '09:00', '09:15', 1, NULL),
 
-SET IDENTITY_INSERT Reservation OFF;
-DBCC CHECKIDENT ('Reservation', RESEED) WITH NO_INFOMSGS;
+       (4, @Today, '08:00', '08:15', 0, 6),
+       (4, @Today, '08:15', '08:30', 0, 6),
+       (4, @Today, '08:30', '08:45', 0, 9),
+       (4, @Today, '08:45', '09:00', 0, 9),
+       (4, @Today, '09:00', '09:15', 1, NULL),
 
-UPDATE RoomAvailability SET ReservationID = 1, AvailabilityStatus = 0
-WHERE RoomID = 1 AND Date = @Today
-  AND StartTime >= '08:00:00' AND StartTime < '08:30:00';
+       (5, @Today, '08:00', '08:15', 1, NULL),
+       (5, @Today, '08:15', '08:30', 1, NULL),
+       (5, @Today, '08:30', '08:45', 0, 7),
+       (5, @Today, '08:45', '09:00', 0, 7),
+       (5, @Today, '09:00', '09:15', 0, 10);
 
-UPDATE RoomAvailability SET ReservationID = 2, AvailabilityStatus = 0
-WHERE RoomID = 2 AND Date = @Today
-  AND StartTime >= '08:00:00' AND StartTime < '08:30:00';
+go
 
-UPDATE RoomAvailability SET ReservationID = 3, AvailabilityStatus = 0
-WHERE RoomID = 1 AND Date = @Today
-  AND StartTime >= '08:30:00' AND StartTime < '09:00:00';
-
-UPDATE RoomAvailability SET ReservationID = 4, AvailabilityStatus = 0
-WHERE RoomID = 3 AND Date = @Today
-  AND StartTime >= '08:00:00' AND StartTime < '08:45:00';
-
-UPDATE RoomAvailability SET ReservationID = 6, AvailabilityStatus = 0
-WHERE RoomID = 4 AND Date = @Today
-  AND StartTime >= '08:00:00' AND StartTime < '08:30:00';
-
-UPDATE RoomAvailability SET ReservationID = 7, AvailabilityStatus = 0
-WHERE RoomID = 5 AND Date = @Today
-  AND StartTime >= '08:30:00' AND StartTime < '09:00:00';
-
-UPDATE RoomAvailability SET ReservationID = 8, AvailabilityStatus = 0
-WHERE RoomID = 2 AND Date = @Today
-  AND StartTime >= '08:45:00' AND StartTime < '09:15:00';
-
-UPDATE RoomAvailability SET ReservationID = 9, AvailabilityStatus = 0
-WHERE RoomID = 4 AND Date = @Today
-  AND StartTime >= '08:30:00' AND StartTime < '09:00:00';
-
-UPDATE RoomAvailability SET ReservationID = 10, AvailabilityStatus = 0
-WHERE RoomID = 5 AND Date = @Today
-  AND StartTime >= '09:00:00' AND StartTime < '09:15:00';
-
-UPDATE Room SET CurrentStatus = 'In use' WHERE RoomID = 3;
-GO
-
-SELECT 'AppUser' AS TableName, COUNT(*) AS RowTotal FROM AppUser
-UNION ALL SELECT 'Room',              COUNT(*) FROM Room
-UNION ALL SELECT 'Reservation',       COUNT(*) FROM Reservation
-UNION ALL SELECT 'RoomAvailability',  COUNT(*) FROM RoomAvailability
-UNION ALL SELECT '  ...booked slots', COUNT(*) FROM RoomAvailability WHERE AvailabilityStatus = 0
-UNION ALL SELECT '  ...free slots',   COUNT(*) FROM RoomAvailability WHERE AvailabilityStatus = 1;
-GO
+select count(*) as AppUserRows from AppUser;
+select count(*) as RoomRows from Room;
+select count(*) as RoomAvailabilityRows from RoomAvailability;
+select count(*) as ReservationRows from Reservation;

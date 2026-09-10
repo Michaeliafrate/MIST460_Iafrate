@@ -42,8 +42,8 @@ def check_availability_api(
     )
 
 @app.get("/get_available_rooms_now/")
-def get_available_rooms_now_api(minutes: int = 60, floor: int = None, min_seats: int = None):
-    return get_available_rooms_now(minutes=minutes, floor=floor, min_seats=min_seats)
+def get_available_rooms_now_api(floor: int = None, min_seats: int = None):
+    return get_available_rooms_now(floor=floor, min_seats=min_seats)
 
 @app.get("/get_room_schedule/")
 def get_room_schedule_api(slot_date: date, room_id: int = None, free_only: bool = False):
@@ -59,17 +59,17 @@ def get_reservation_by_id_api(reservation_id: int):
 
 @app.post("/register_user/")
 def register_user_api(
+        first_name: str,
+        last_name: str,
         email: str,
         password: str,
-        first_name: str = None,
-        last_name: str = None,
         user_role: str = "Student"
 ):
     return register_user(
-        email=email,
-        password=password,
         first_name=first_name,
         last_name=last_name,
+        email=email,
+        password=password,
         user_role=user_role
     )
 

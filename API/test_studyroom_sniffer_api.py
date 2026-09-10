@@ -65,13 +65,11 @@ only = {row["RoomNumber"] for row in
 check("check_availability filters by room_number", only == {"450"}, f"{only}")
 
 body = get("get_available_rooms_now").json()
-check("get_available_rooms_now returns a window and a room list",
-      "searched" in body and "data" in body,
-      f"{body['searched'].get('FromTime')}-{body['searched'].get('ToTime')}, "
-      f"{len(body['data'])} rooms free now")
+check("get_available_rooms_now returns the free slots left today",
+      "data" in body, f"{len(body['data'])} free slots from now on")
 
 slots = get("get_room_schedule", {"slot_date": TODAY, "room_id": 1}).json()["data"]
-booked = [row for row in slots if row["SlotStatus"] == "Booked"]
+booked = [row for row in slots if not row["AvailabilityStatus"]]
 check("get_room_schedule returns room 130's 5 slots",
       len(slots) == 5 and len(booked) == 4, f"{len(slots)} slots, {len(booked)} booked")
 
@@ -139,11 +137,13 @@ body = post("register_user", {"email": new_email, "password": "Mountaineers9!",
 new_user_id = body.get("app_user_id")
 check("register_user creates an account", new_user_id is not None, body["status_message"])
 
-message = post("register_user", {"email": new_email,
+message = post("register_user", {"first_name": "Test", "last_name": "User",
+                                 "email": new_email,
                                  "password": "Mountaineers9!"}).json()["status_message"]
 check("register_user refuses a duplicate email", "already registered" in message, message)
 
-message = post("register_user", {"email": "someone@mix.wvu.edu", "password": "x",
+message = post("register_user", {"first_name": "Some", "last_name": "One",
+                                 "email": "someone@mix.wvu.edu", "password": "x",
                                  "user_role": "Wizard"}).json()["status_message"]
 check("register_user refuses an invalid role", "Student or Admin" in message, message)
 
@@ -161,8 +161,8 @@ message = post("update_reservation", {"reservation_id": new_id, "room_id": 3,
 check("update_reservation shortens it in place", "successfully" in message, message)
 
 row = get("get_reservation_by_id", {"reservation_id": new_id}).json()["data"][0]
-check("update_reservation rewrote TotalTime", row["TotalTimeStored"] == 15,
-      f"TotalTime={row['TotalTimeStored']}, from slots={row['TotalTimeFromSlots']}")
+check("update_reservation rewrote TotalTime", row["TotalTime"] == 15,
+      f"TotalTime={row['TotalTime']}, from slots={row['TotalTimeFromSlots']}")
 
 message = post("update_reservation", {"reservation_id": new_id, "room_id": 5,
                                       "slot_date": TODAY, "start_time": "08:00:00",
@@ -171,8 +171,8 @@ check("update_reservation moves it to another room", "successfully" in message, 
 
 row = get("get_reservation_by_id", {"reservation_id": new_id}).json()["data"][0]
 check("the moved reservation reports the new room",
-      row["RoomNumber"] == "450" and row["TotalTimeStored"] == 30,
-      f"room {row['RoomNumber']}, {row['TotalTimeStored']} minutes")
+      row["RoomNumber"] == "450" and row["TotalTime"] == 30,
+      f"room {row['RoomNumber']}, {row['TotalTime']} minutes")
 
 message = post("update_reservation", {"reservation_id": new_id, "room_id": 1,
                                       "slot_date": TODAY, "start_time": "08:00:00",
@@ -181,14 +181,22 @@ check("update_reservation refuses a room that is taken", "not free" in message, 
 
 row = get("get_reservation_by_id", {"reservation_id": new_id}).json()["data"][0]
 check("the refused move left the reservation untouched",
-      row["RoomNumber"] == "450" and row["TotalTimeStored"] == 30,
-      f"still room {row['RoomNumber']}, {row['TotalTimeStored']} minutes")
+      row["RoomNumber"] == "450" and row["TotalTime"] == 30,
+      f"still room {row['RoomNumber']}, {row['TotalTime']} minutes")
 
 message = post("update_reservation", {"reservation_id": 9999, "room_id": 1,
                                       "slot_date": TODAY, "start_time": "08:00:00",
                                       "end_time": "08:30:00"}).json()["status_message"]
 check("update_reservation refuses a missing reservation",
       "No such reservation" in message, message)
+
+# Requirement 6 has to hold when moving a booking, not only when making one.
+# Reservation 10 belongs to user 1, who also holds room 130 over 08:30-09:00.
+message = post("update_reservation", {"reservation_id": 10, "room_id": 3,
+                                      "slot_date": TODAY, "start_time": "08:45:00",
+                                      "end_time": "09:00:00"}).json()["status_message"]
+check("update_reservation refuses a move that double books the same user",
+      "already has another room" in message, message)
 
 message = post("check_in", {"reservation_id": new_id}).json()["status_message"]
 check("check_in succeeds", "successfully" in message, message)
@@ -209,5 +217,5 @@ print(f"  test account {new_email} (AppUserID {new_user_id}) was left behind on 
 
 print(f"\n{'=' * 68}")
 print(f"{passed} passed, {failed} failed")
-print("Rerun 'python run_sql.py Data/InsertDataIafrate.sql' to reset row counts.")
+print("Rerun 'python run_sql.py' to rebuild the tables and reset row counts.")
 sys.exit(1 if failed else 0)

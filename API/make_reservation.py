@@ -12,15 +12,14 @@ def make_reservation(
     cursor = conn.cursor(as_dict=True)
 
     try:
-        cursor.execute("declare @ReservationID int; "
-                       "exec procMakeReservation %s, %s, %s, %s, %s, @ReservationID output",
+        cursor.execute("exec procMakeReservation %s, %s, %s, %s, %s",
                        (app_user_id, room_id, slot_date,
                         str(start_time), str(end_time)))
         rows = cursor.fetchall()
         conn.commit()
-        reservation_id = rows[0]["ReservationID"] if rows else None
-        return {"status_message": f"Reservation {reservation_id} created successfully.",
-                "reservation_id": reservation_id}
+        reservation_id = rows[0]["ReservationID"]
+        return {"status_message": rows[0]["StatusMessage"],
+                "reservation_id": reservation_id if reservation_id else None}
     except Exception as e:
         conn.rollback()
         return {"status_message": f"Error occurred: {e}"}
